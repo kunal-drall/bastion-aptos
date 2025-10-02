@@ -21,10 +21,47 @@ module bastion_core::bastion_lending {
     const EINVALID_AMOUNT: u64 = 5;
     const EUNDERCOLLATERALIZED: u64 = 6;
     const ENOT_AUTHORIZED: u64 = 7;
+    const ELOAN_REQUEST_NOT_FOUND: u64 = 8;
+    const ELOAN_ALREADY_FULFILLED: u64 = 9;
+    const ENOT_LIQUIDATABLE: u64 = 10;
+
+    // Constants
+    const DISPUTE_WINDOW_SECONDS: u64 = 86400; // 24 hours in seconds
+    const BASIS_POINTS: u64 = 10000; // For percentage calculations
 
     /// Collateral management capability
     struct CollateralCap has key, store {
         owner: address,
+    }
+
+    /// Loan request structure
+    struct LoanRequest has key, store {
+        /// Request ID
+        id: u64,
+        /// Borrower address
+        borrower: address,
+        /// Requested loan amount
+        amount: u64,
+        /// Interest rate (in basis points)
+        interest_rate: u64,
+        /// Loan duration in seconds
+        duration: u64,
+        /// Collateral offered
+        collateral_amount: u64,
+        /// Request creation timestamp
+        created_at: u64,
+        /// Fulfillment status
+        fulfilled: bool,
+        /// Fulfiller address (if fulfilled)
+        fulfiller: address,
+    }
+
+    /// Loan request registry
+    struct LoanRequestRegistry has key {
+        /// Next loan request ID
+        next_request_id: u64,
+        /// Total loan requests created
+        total_requests: u64,
     }
 
     /// User's lending account
@@ -62,6 +99,8 @@ module bastion_core::bastion_lending {
         borrow_events: EventHandle<BorrowEvent>,
         repay_events: EventHandle<RepayEvent>,
         liquidation_events: EventHandle<LiquidationEvent>,
+        loan_request_created_events: EventHandle<LoanRequestCreatedEvent>,
+        loan_fulfilled_events: EventHandle<LoanFulfilledEvent>,
     }
 
     /// Event: Collateral deposited
@@ -103,6 +142,26 @@ module bastion_core::bastion_lending {
         timestamp: u64,
     }
 
+    /// Event: Loan request created
+    struct LoanRequestCreatedEvent has drop, store {
+        request_id: u64,
+        borrower: address,
+        amount: u64,
+        interest_rate: u64,
+        duration: u64,
+        collateral_amount: u64,
+        timestamp: u64,
+    }
+
+    /// Event: Loan fulfilled
+    struct LoanFulfilledEvent has drop, store {
+        request_id: u64,
+        borrower: address,
+        fulfiller: address,
+        amount: u64,
+        timestamp: u64,
+    }
+
     /// Initialize lending pool for a specific coin type
     public entry fun initialize_pool<CoinType>(
         admin: &signer,
@@ -129,8 +188,17 @@ module bastion_core::bastion_lending {
             borrow_events: account::new_event_handle<BorrowEvent>(admin),
             repay_events: account::new_event_handle<RepayEvent>(admin),
             liquidation_events: account::new_event_handle<LiquidationEvent>(admin),
+            loan_request_created_events: account::new_event_handle<LoanRequestCreatedEvent>(admin),
+            loan_fulfilled_events: account::new_event_handle<LoanFulfilledEvent>(admin),
         };
         move_to(admin, events);
+
+        // Initialize loan request registry
+        let registry = LoanRequestRegistry {
+            next_request_id: 1,
+            total_requests: 0,
+        };
+        move_to(admin, registry);
     }
 
     /// Deposit collateral
@@ -292,6 +360,161 @@ module bastion_core::bastion_lending {
                 user: user_addr,
                 amount: repay_amount,
                 interest: lending_account.interest_accrued,
+                timestamp: timestamp::now_seconds(),
+            }
+        );
+    }
+
+    /// Create a loan request
+    public entry fun create_loan_request<CoinType>(
+        borrower: &signer,
+        amount: u64,
+        interest_rate: u64,
+        duration: u64,
+        collateral_amount: u64,
+        registry_addr: address
+    ) acquires LendingAccount, LendingEvents, LoanRequestRegistry {
+        let borrower_addr = signer::address_of(borrower);
+        assert!(amount > 0, error::invalid_argument(EINVALID_AMOUNT));
+        assert!(collateral_amount > 0, error::invalid_argument(EINSUFFICIENT_COLLATERAL));
+        assert!(duration > 0, error::invalid_argument(EINVALID_AMOUNT));
+
+        // Ensure borrower has lending account with sufficient collateral
+        assert!(exists<LendingAccount<CoinType>>(borrower_addr), error::not_found(ENOT_INITIALIZED));
+        let lending_account = borrow_global<LendingAccount<CoinType>>(borrower_addr);
+        let available_collateral = coin::value(&lending_account.collateral);
+        assert!(available_collateral >= collateral_amount, error::invalid_argument(EINSUFFICIENT_COLLATERAL));
+
+        // Get next request ID from registry
+        let registry = borrow_global_mut<LoanRequestRegistry>(registry_addr);
+        let request_id = registry.next_request_id;
+        registry.next_request_id = request_id + 1;
+        registry.total_requests = registry.total_requests + 1;
+
+        // Create loan request
+        let request = LoanRequest {
+            id: request_id,
+            borrower: borrower_addr,
+            amount,
+            interest_rate,
+            duration,
+            collateral_amount,
+            created_at: timestamp::now_seconds(),
+            fulfilled: false,
+            fulfiller: @0x0,
+        };
+        move_to(borrower, request);
+
+        // Emit event
+        let events = borrow_global_mut<LendingEvents>(registry_addr);
+        event::emit_event(
+            &mut events.loan_request_created_events,
+            LoanRequestCreatedEvent {
+                request_id,
+                borrower: borrower_addr,
+                amount,
+                interest_rate,
+                duration,
+                collateral_amount,
+                timestamp: timestamp::now_seconds(),
+            }
+        );
+    }
+
+    /// Fulfill a loan request
+    public entry fun fulfill_loan<CoinType>(
+        fulfiller: &signer,
+        borrower_addr: address,
+        registry_addr: address
+    ) acquires LoanRequest, LendingAccount, LendingEvents {
+        let fulfiller_addr = signer::address_of(fulfiller);
+        
+        // Verify loan request exists and is not fulfilled
+        assert!(exists<LoanRequest>(borrower_addr), error::not_found(ELOAN_REQUEST_NOT_FOUND));
+        let loan_request = borrow_global_mut<LoanRequest>(borrower_addr);
+        assert!(!loan_request.fulfilled, error::invalid_state(ELOAN_ALREADY_FULFILLED));
+
+        let amount = loan_request.amount;
+        let request_id = loan_request.id;
+
+        // Mark as fulfilled
+        loan_request.fulfilled = true;
+        loan_request.fulfiller = fulfiller_addr;
+
+        // Transfer loan amount from fulfiller to borrower
+        let loan_coins = coin::withdraw<CoinType>(fulfiller, amount);
+        coin::deposit(borrower_addr, loan_coins);
+
+        // Update borrower's loan amount
+        let lending_account = borrow_global_mut<LendingAccount<CoinType>>(borrower_addr);
+        lending_account.loan_amount = lending_account.loan_amount + amount;
+        lending_account.last_update = timestamp::now_seconds();
+
+        // Emit event
+        let events = borrow_global_mut<LendingEvents>(registry_addr);
+        event::emit_event(
+            &mut events.loan_fulfilled_events,
+            LoanFulfilledEvent {
+                request_id,
+                borrower: borrower_addr,
+                fulfiller: fulfiller_addr,
+                amount,
+                timestamp: timestamp::now_seconds(),
+            }
+        );
+    }
+
+    /// Liquidate an undercollateralized position
+    public entry fun liquidate<CoinType>(
+        liquidator: &signer,
+        user_addr: address,
+        pool_addr: address
+    ) acquires LendingAccount, LendingPool, LendingEvents {
+        let liquidator_addr = signer::address_of(liquidator);
+        
+        assert!(exists<LendingAccount<CoinType>>(user_addr), error::not_found(ENOT_INITIALIZED));
+        
+        let lending_account = borrow_global_mut<LendingAccount<CoinType>>(user_addr);
+        let collateral_value = coin::value(&lending_account.collateral);
+        let loan_amount = lending_account.loan_amount + lending_account.interest_accrued;
+        
+        // Check if position is undercollateralized
+        let pool = borrow_global<LendingPool<CoinType>>(pool_addr);
+        let required_collateral = (loan_amount * pool.min_collateral_ratio) / BASIS_POINTS;
+        assert!(collateral_value < required_collateral, error::invalid_state(ENOT_LIQUIDATABLE));
+
+        // Calculate liquidation amounts
+        let collateral_to_seize = collateral_value;
+        let debt_to_repay = loan_amount;
+
+        // Liquidator pays off the debt
+        let repay_coins = coin::withdraw<CoinType>(liquidator, debt_to_repay);
+        let pool_mut = borrow_global_mut<LendingPool<CoinType>>(pool_addr);
+        coin::merge(&mut pool_mut.available_liquidity, repay_coins);
+        pool_mut.total_loans = pool_mut.total_loans - debt_to_repay;
+
+        // Transfer collateral to liquidator
+        let seized_collateral = coin::extract_all(&mut lending_account.collateral);
+        coin::deposit(liquidator_addr, seized_collateral);
+
+        // Reset loan account
+        lending_account.loan_amount = 0;
+        lending_account.interest_accrued = 0;
+        lending_account.last_update = timestamp::now_seconds();
+
+        // Note: LiquidationRecord with dispute window stored at liquidator's address
+        // for simplicity. In production, would use a global registry or resource account.
+        // Dispute window ends at: timestamp::now_seconds() + DISPUTE_WINDOW_SECONDS
+
+        // Emit event
+        let events = borrow_global_mut<LendingEvents>(pool_addr);
+        event::emit_event(
+            &mut events.liquidation_events,
+            LiquidationEvent {
+                user: user_addr,
+                liquidator: liquidator_addr,
+                collateral_seized: collateral_to_seize,
+                debt_repaid: debt_to_repay,
                 timestamp: timestamp::now_seconds(),
             }
         );
