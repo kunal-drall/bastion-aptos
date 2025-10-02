@@ -1,0 +1,15 @@
+[package]
+name = "bastion_core"
+version = "0.1.0"
+upgrade_policy = "compatible"
+
+[addresses]
+bastion_core = "_"
+
+[dependencies.AptosFramework]
+git = "https://github.com/aptos-labs/aptos-core.git"
+rev = "mainnet"
+subdir = "aptos-move/framework/aptos-framework"
+
+[dev-addresses]
+bastion_core = "0xCAFE"
