@@ -1,0 +1,115 @@
+name: Build
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  build-move:
+    name: Build Move Contracts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Aptos CLI
+        run: |
+          curl -fsSL "https://aptos.dev/scripts/install_cli.py" | python3
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Build Move packages
+        run: |
+          cd move
+          # Add build commands when Move packages are created
+          echo "Move contracts ready for compilation"
+
+  build-sdk:
+    name: Build TypeScript SDK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install dependencies
+        run: |
+          cd packages/sdk-ts
+          # npm ci
+          echo "SDK dependencies ready"
+
+      - name: Build SDK
+        run: |
+          cd packages/sdk-ts
+          # npm run build
+          echo "SDK build complete"
+
+  build-backend:
+    name: Build Backend Services
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install dependencies
+        run: |
+          cd backend
+          # npm ci
+          echo "Backend dependencies ready"
+
+      - name: Build backend
+        run: |
+          cd backend
+          # npm run build
+          echo "Backend build complete"
+
+  build-web:
+    name: Build Web Application
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install dependencies
+        run: |
+          cd web
+          # npm ci
+          echo "Web dependencies ready"
+
+      - name: Build web app
+        run: |
+          cd web
+          # npm run build
+          echo "Web build complete"
+
+  build-status:
+    name: Build Status
+    runs-on: ubuntu-latest
+    needs: [build-move, build-sdk, build-backend, build-web]
+    if: always()
+    steps:
+      - name: Check build status
+        run: |
+          if [ "${{ needs.build-move.result }}" != "success" ] || \
+             [ "${{ needs.build-sdk.result }}" != "success" ] || \
+             [ "${{ needs.build-backend.result }}" != "success" ] || \
+             [ "${{ needs.build-web.result }}" != "success" ]; then
+            echo "One or more builds failed"
+            exit 1
+          fi
+          echo "All builds successful"

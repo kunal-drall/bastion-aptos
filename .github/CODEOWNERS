@@ -1,0 +1,38 @@
+# CODEOWNERS file for Bastion Aptos
+# This file defines who is responsible for reviewing changes to specific parts of the codebase.
+# See https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# Default owners for everything in the repo
+# These users will be requested for review when someone opens a pull request
+* @kunal-drall
+
+# Move smart contracts - require review from blockchain team
+/move/ @kunal-drall
+
+# TypeScript SDK - require review from SDK maintainers
+/packages/sdk-ts/ @kunal-drall
+
+# Backend services - require review from backend team
+/backend/ @kunal-drall
+
+# Web application - require review from frontend team
+/web/ @kunal-drall
+
+# Infrastructure - require review from DevOps/infrastructure team
+/infra/ @kunal-drall
+
+# Documentation - can be reviewed by any team lead
+/docs/ @kunal-drall
+
+# GitHub Actions workflows - require review from DevOps
+/.github/workflows/ @kunal-drall
+
+# Security-related files - require review from security team
+/SECURITY.md @kunal-drall
+/.github/CODEOWNERS @kunal-drall
+
+# Configuration files - require review from project leads
+*.yml @kunal-drall
+*.yaml @kunal-drall
+*.json @kunal-drall
+package.json @kunal-drall
